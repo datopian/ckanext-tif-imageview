@@ -9,6 +9,11 @@
   let ajax_url = document.getElementById("ajax_url").value;
   let formdata = new FormData();
   formdata.set('resource_id', document.getElementById("resource_id").value);
+  
+  // Add CSRF token
+  var csrfToken = document.querySelector('meta[name=csrf_field_name]').getAttribute('content');
+  var csrfValue = document.querySelector('meta[name=' + csrfToken + ']').getAttribute('content');
+  formdata.set(csrfToken, csrfValue);
 
   request.onreadystatechange = function() {
       if (request.readyState == XMLHttpRequest.DONE && request.status == 200 ){            
