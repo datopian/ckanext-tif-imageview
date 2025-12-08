@@ -57,13 +57,13 @@ def get_preview_image():
 
 
 def _get_or_create_s3_preview(resource, upload):
-    """Get S3 preview URL or generate and upload if missing"""
+    """Get S3 preview URL (preview should already exist from after_resource_create hook)"""
     try:
         # Construct preview filename
         base_name = os.path.splitext(resource.get('name', 'file.tif'))[0]
         preview_filename = f"{base_name}_preview.jpg"
         
-        # Build preview URL to check if it exists
+        # Build preview URL
         resource_url = resource.get('url', '')
         if resource_url:
             if resource_url.endswith('.tif') or resource_url.endswith('.tiff'):
@@ -78,79 +78,11 @@ def _get_or_create_s3_preview(resource, upload):
             resource_id = resource.get('id')
             preview_url = f"{site_url}/dataset/{package_id}/resource/{resource_id}/download/{preview_filename}"
         
-        # Check if preview already exists in S3 using authenticated boto3
-        from ckan.common import config
-        import boto3
-        from botocore.client import Config as BotoConfig
-        from botocore.exceptions import ClientError
-        
-        bucket_name = config.get('ckanext.s3filestore.aws_bucket_name', 'ckan')
-        resource_id = resource.get('id')
-        region = config.get('ckanext.s3filestore.region_name', 'us-east-1')
-        aws_access_key_id = config.get('ckanext.s3filestore.aws_access_key_id')
-        aws_secret_access_key = config.get('ckanext.s3filestore.aws_secret_access_key')
-        s3_host = config.get('ckanext.s3filestore.host_name')
-        
-        # S3 key for preview
-        s3_preview_key = f"resources/{resource_id}/{preview_filename}"
-        
-        try:
-            # Configure boto3 client
-            s3_config = BotoConfig(signature_version='s3v4')
-            endpoint_url = s3_host if s3_host and ('minio' in s3_host or ':' in s3_host.split('//')[-1]) else None
-            
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=aws_access_key_id,
-                aws_secret_access_key=aws_secret_access_key,
-                region_name=region,
-                endpoint_url=endpoint_url,
-                config=s3_config
-            )
-            
-            # Check if preview exists with head_object
-            s3_client.head_object(Bucket=bucket_name, Key=s3_preview_key)
-            log.info(f"Preview already exists in S3: {s3_preview_key}")
-            return preview_url
-        except ClientError as e:
-            if e.response['Error']['Code'] == '404':
-                log.debug(f"Preview not found in S3 (will generate): {s3_preview_key}")
-            else:
-                log.warning(f"Error checking preview in S3: {e}")
-        except Exception as e:
-            log.warning(f"Error checking preview existence: {e}")
-        
-        log.info(f"Generating preview for resource: {resource['id']}")
-        
-        # Download, convert, and upload preview
-        _generate_and_upload_preview(resource, preview_filename)
-        
-        # Build preview URL based on the resource's URL pattern
-        # Replace the original filename extension with _preview.jpg
-        resource_url = resource.get('url', '')
-        if resource_url:
-            # For S3: URL like http://localhost:5000/dataset/.../download/file.tif
-            # We need: http://localhost:5000/dataset/.../download/file_preview.jpg
-            if resource_url.endswith('.tif') or resource_url.endswith('.tiff'):
-                # Remove extension and add _preview.jpg
-                base_url = resource_url.rsplit('.', 1)[0]
-                preview_url = f"{base_url}_preview.jpg"
-            else:
-                # Fallback: just append _preview.jpg
-                preview_url = f"{resource_url}_preview.jpg"
-        else:
-            # Fallback: construct from CKAN site URL
-            from ckan.common import config
-            site_url = config.get('ckan.site_url', 'http://localhost:5000')
-            package_id = resource.get('package_id')
-            resource_id = resource.get('id')
-            preview_url = f"{site_url}/dataset/{package_id}/resource/{resource_id}/download/{preview_filename}"
-        
-        log.info(f"Preview URL: {preview_url}")
+        log.debug(f"Preview URL: {preview_url}")
         return preview_url
         
     except Exception as e:
-        log.error(f"Error with preview: {e}", exc_info=True)
+        log.error(f"Error getting preview URL: {e}", exc_info=True)
         return None
 
 
@@ -188,7 +120,7 @@ def _generate_and_upload_preview(resource, preview_filename):
             log.warning(f"Error checking resource status: {e}")
             time.sleep(1)
     
-    # Step 2: Get the actual file - use uploader to access it
+    # Step 2: Get the actual file
     upload = uploader.get_resource_uploader(resource)
     uploader_class = upload.__class__.__name__
     is_s3 = 'S3' in uploader_class
@@ -200,45 +132,86 @@ def _generate_and_upload_preview(resource, preview_filename):
         temp_tif_path = temp_tif.name
         
         if is_s3:
-            # For S3: Download using authenticated boto3 (works for both MinIO and AWS S3)
-            # Cannot use CKAN URL from inside container as it causes routing issues
+            # For S3: Use the S3 client from ckanext-s3filestore uploader
+            # This ensures we use the exact same configuration and credentials
             from ckan.common import config
-            import boto3
-            from botocore.client import Config as BotoConfig
             
             # Get S3 configuration
-            bucket_name = config.get('ckanext.s3filestore.aws_bucket_name', 'ckan')
+            storage_path = config.get('ckanext.s3filestore.aws_storage_path', '')
+            
+            # Construct S3 key
             resource_id = resource.get('id')
-            region = config.get('ckanext.s3filestore.region_name', 'us-east-1')
-            aws_access_key_id = config.get('ckanext.s3filestore.aws_access_key_id')
-            aws_secret_access_key = config.get('ckanext.s3filestore.aws_secret_access_key')
-            s3_host = config.get('ckanext.s3filestore.host_name')
-            
-            # Get just the filename
             filename = resource.get('name', '')
-            resource_url = resource.get('url', '')
-            if resource_url and not resource_url.startswith(('http://', 'https://')):
-                filename = resource_url
+            if storage_path:
+                s3_key = f"{storage_path}/resources/{resource_id}/{filename}"
+            else:
+                s3_key = f"resources/{resource_id}/{filename}"
             
-            # S3 key
-            s3_key = f"resources/{resource_id}/{filename}"
+            # Get the S3 client from the uploader instance (reuse its configuration)
+            s3_client = upload.get_s3_client()
+            bucket_name = upload.bucket_name
             
-            # Configure boto3 client
-            s3_config = BotoConfig(signature_version='s3v4')
-            # Use endpoint_url for MinIO (has hostname with port or 'minio'), None for AWS S3
-            endpoint_url = s3_host if s3_host and ('minio' in s3_host or ':' in s3_host.split('//')[-1]) else None
+            log.info(f"Generating presigned URL for S3: bucket={bucket_name}, key={s3_key}")
+            log.info(f"Using uploader config: region={upload.region}, signature={upload.signature}, addressing={upload.addressing_style}")
             
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=aws_access_key_id,
-                aws_secret_access_key=aws_secret_access_key,
-                region_name=region,
-                endpoint_url=endpoint_url,
-                config=s3_config
+            # Generate presigned URL (valid for 5 minutes)
+            presigned_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': bucket_name, 'Key': s3_key},
+                ExpiresIn=300
             )
             
-            log.info(f"Downloading from S3: bucket={bucket_name}, key={s3_key}")
-            s3_client.download_fileobj(bucket_name, s3_key, temp_tif)
+            log.info(f"Downloading from presigned URL (this may take several minutes for large files)")
+            
+            # Download using requests with presigned URL (direct S3 access, bypasses CKAN)
+            import requests
+            
+            try:
+                # Stream download to handle large files efficiently
+                response = requests.get(presigned_url, stream=True, timeout=(30, 600))
+                response.raise_for_status()
+                
+                # Write chunks to temp file
+                bytes_downloaded = 0
+                chunk_size = 8192  # 8KB chunks
+                
+                with open(temp_tif.name, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        if chunk:
+                            f.write(chunk)
+                            bytes_downloaded += len(chunk)
+                            
+                            # Log progress every 10MB
+                            if bytes_downloaded % (10 * 1024 * 1024) < chunk_size:
+                                log.debug(f"Downloaded {bytes_downloaded / (1024 * 1024):.1f} MB...")
+                
+                log.info(f"Downloaded {bytes_downloaded} bytes using presigned URL")
+                
+                # Check file size
+                if bytes_downloaded < 1000:
+                    # File too small - likely an error message
+                    with open(temp_tif.name, 'r') as f:
+                        content = f.read()
+                    log.error(f"Downloaded file too small ({bytes_downloaded} bytes), S3 error: {content[:500]}")
+                    
+                    # Parse error details
+                    error_msg = "Failed to download file from S3"
+                    if 'InvalidAccessKeyId' in content:
+                        error_msg = "S3 credentials are invalid. The AWS Access Key ID does not exist. Please check CKANEXT__S3FILESTORE__AWS_ACCESS_KEY_ID in .env"
+                    elif 'AccessDenied' in content or 'Forbidden' in content:
+                        error_msg = "S3 access denied. Ensure the AWS credentials have 's3:GetObject' permission for the bucket"
+                    elif 'NoSuchKey' in content:
+                        error_msg = f"File not found in S3. Check the file was uploaded successfully. Key: {s3_key}"
+                    else:
+                        error_msg = f"S3 error: {content[:200]}"
+                    
+                    raise Exception(error_msg)
+                
+            except requests.exceptions.Timeout:
+                raise Exception("Download timed out after 10 minutes. File may be too large.")
+            except requests.exceptions.RequestException as e:
+                log.error(f"Download failed: {e}")
+                raise Exception(f"Failed to download file: {e}")
         else:
             # For local storage: Read directly from file path
             log.info(f"Reading from local storage")
@@ -440,15 +413,20 @@ class TifImageviewPlugin(plugins.SingletonPlugin):
     # IResourceController
     
     def after_resource_create(self, context, resource):
-        """Generate preview after resource is created"""
+        """Generate preview asynchronously after resource creation"""
         self._generate_preview_if_tif(resource)
     
     def after_resource_update(self, context, resource):
-        """Regenerate preview after resource is updated"""
-        self._generate_preview_if_tif(resource)
+        """Regenerate preview asynchronously after resource update"""
+        self._generate_preview_if_tif(resource, force_regenerate=True)
     
-    def _generate_preview_if_tif(self, resource):
-        """Generate preview JPEG if resource is a TIF file"""
+    def _generate_preview_if_tif(self, resource, force_regenerate=False):
+        """Generate preview JPEG if resource is a TIF file (runs in background thread)
+        
+        Args:
+            resource: The resource dict
+            force_regenerate: If True, delete existing preview before generating new one
+        """
         try:
             # Check if it's a TIF file
             format_lower = resource.get('format', '').lower()
@@ -457,32 +435,64 @@ class TifImageviewPlugin(plugins.SingletonPlugin):
             if format_lower not in ['tif', 'tiff'] and not url.endswith(('.tif', '.tiff')):
                 return
             
-            upload = uploader.get_resource_uploader(resource)
+            # Run in background thread to avoid blocking the request
+            import threading
             
-            # Check if S3 uploader by checking class name
-            uploader_class = upload.__class__.__name__
-            is_s3 = 'S3' in uploader_class or hasattr(upload, 'get_url_from_filename')
+            def generate_preview_task():
+                try:
+                    log.info(f"Starting background preview generation for resource: {resource['id']}")
+                    
+                    # Construct preview filename
+                    base_name = os.path.splitext(resource.get('name', 'file.tif'))[0]
+                    preview_filename = f"{base_name}_preview.jpg"
+                    
+                    # If force_regenerate, delete existing preview first
+                    if force_regenerate:
+                        try:
+                            upload = uploader.get_resource_uploader(resource)
+                            uploader_class = upload.__class__.__name__
+                            is_s3 = 'S3' in uploader_class
+                            
+                            if is_s3:
+                                # Delete from S3
+                                from ckan.common import config
+                                storage_path = config.get('ckanext.s3filestore.aws_storage_path', '')
+                                resource_id = resource.get('id')
+                                
+                                if storage_path:
+                                    preview_key = f"{storage_path}/resources/{resource_id}/{preview_filename}"
+                                else:
+                                    preview_key = f"resources/{resource_id}/{preview_filename}"
+                                
+                                s3_client = upload.get_s3_client()
+                                bucket_name = upload.bucket_name
+                                
+                                log.info(f"Deleting existing preview from S3: {preview_key}")
+                                s3_client.delete_object(Bucket=bucket_name, Key=preview_key)
+                                log.info(f"Deleted existing preview from S3")
+                            else:
+                                # Delete from local storage
+                                filepath = upload.get_path(resource['id'])
+                                preview_path = _get_preview_path(filepath)
+                                if os.path.exists(preview_path):
+                                    log.info(f"Deleting existing preview: {preview_path}")
+                                    os.unlink(preview_path)
+                                    log.info(f"Deleted existing preview")
+                        except Exception as e:
+                            log.warning(f"Could not delete existing preview (will overwrite): {e}")
+                    
+                    # Download, convert, and upload
+                    _generate_and_upload_preview(resource, preview_filename)
+                    
+                    log.info(f"Successfully generated and uploaded preview in background: {preview_filename}")
+                    
+                except Exception as e:
+                    log.error(f"Error generating preview in background: {e}", exc_info=True)
             
-            log.info(f"Preview generation for {resource['id']}, uploader: {uploader_class}, is_s3: {is_s3}")
-            
-            # Unified approach for both S3 and local storage
-            # 1. Download using resource URL to temp file
-            # 2. Convert to JPEG
-            # 3. Upload using CKAN uploader (handles both S3 and local)
-            try:
-                log.info(f"Generating preview for resource: {resource['id']}, uploader: {uploader_class}")
-                
-                # Construct preview filename
-                base_name = os.path.splitext(resource.get('name', 'file.tif'))[0]
-                preview_filename = f"{base_name}_preview.jpg"
-                
-                # Download, convert, and upload
-                _generate_and_upload_preview(resource, preview_filename)
-                
-                log.info(f"Successfully generated and uploaded preview: {preview_filename}")
-                
-            except Exception as e:
-                log.error(f"Error generating preview: {e}", exc_info=True)
+            # Start background thread
+            thread = threading.Thread(target=generate_preview_task, daemon=True)
+            thread.start()
+            log.info(f"Preview generation started in background thread for resource: {resource['id']}")
                 
         except Exception as e:
-            log.error(f"Error in preview generation hook: {e}", exc_info=True)
+            log.error(f"Error starting preview generation thread: {e}", exc_info=True)
