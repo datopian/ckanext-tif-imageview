@@ -1,30 +1,11 @@
-{% set dest_url = h.url_for('tif_imageview.convert', image_id=resource.id, _external=True) %}
-<img id=imageid src=""> 
-<input type="hidden" id="ajax_url" value="{{dest_url}}">
-<input type="hidden" id="resource_id" value="{{resource.id}}">
+{% set preview_url = h.url_for('tif_imageview.preview', resource_id=resource.id, _external=True) %}
+<img id="tif-preview" src="{{ preview_url }}" alt="TIF Preview" style="max-width: 100%; height: auto;">
 
-  
 <script type="text/javascript">
-  let request = new XMLHttpRequest();
-  let ajax_url = document.getElementById("ajax_url").value;
-  let formdata = new FormData();
-  formdata.set('resource_id', document.getElementById("resource_id").value);
-  
-  // Add CSRF token
-  var csrfToken = document.querySelector('meta[name=csrf_field_name]').getAttribute('content');
-  var csrfValue = document.querySelector('meta[name=' + csrfToken + ']').getAttribute('content');
-  formdata.set(csrfToken, csrfValue);
-
-  request.onreadystatechange = function() {
-      if (request.readyState == XMLHttpRequest.DONE && request.status == 200 ){            
-          document.getElementById("imageid").setAttribute("src", 'data:image/jpg;base64,' + this.responseText);
-      }
-      else {          
-          console.info(this.status)
-      }
-      
+  // Handle image load errors
+  document.getElementById('tif-preview').onerror = function() {
+      this.alt = 'Failed to load preview. Please try downloading the file.';
+      this.style.border = '1px solid #ccc';
+      this.style.padding = '20px';
   };
-
-  request.open("POST", ajax_url, true);
-  request.send(formdata);
 </script>
