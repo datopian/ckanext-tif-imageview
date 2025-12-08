@@ -139,13 +139,29 @@ def _generate_and_upload_preview(resource, preview_filename):
             # Get S3 configuration
             storage_path = config.get('ckanext.s3filestore.aws_storage_path', '')
             
-            # Construct S3 key
+            # Construct S3 key - extract filename from URL since resource['name'] may be outdated
             resource_id = resource.get('id')
-            filename = resource.get('name', '')
+            
+            # Try to get actual filename from uploader first (most reliable)
+            try:
+                actual_filename = upload.get_path(resource_id).split('/')[-1]
+                log.info(f"Got filename from uploader path: {actual_filename}")
+            except:
+                # Fallback: extract from URL
+                url = refreshed_resource.get('url', '')
+                if url and '/download/' in url:
+                    # Extract filename from URL like: .../download/2025-12-08-11-26-11/small_world.tif
+                    actual_filename = url.split('/download/')[-1].split('/')[-1]
+                    log.info(f"Extracted filename from URL: {actual_filename}")
+                else:
+                    # Last resort: use resource name
+                    actual_filename = resource.get('name', 'file.tif')
+                    log.info(f"Using resource name: {actual_filename}")
+            
             if storage_path:
-                s3_key = f"{storage_path}/resources/{resource_id}/{filename}"
+                s3_key = f"{storage_path}/resources/{resource_id}/{actual_filename}"
             else:
-                s3_key = f"resources/{resource_id}/{filename}"
+                s3_key = f"resources/{resource_id}/{actual_filename}"
             
             # Get the S3 client from the uploader instance (reuse its configuration)
             s3_client = upload.get_s3_client()
