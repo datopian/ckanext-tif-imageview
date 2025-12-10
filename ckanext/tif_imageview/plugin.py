@@ -135,37 +135,81 @@ def _generate_and_upload_preview(resource, preview_filename):
             # For S3: Use the S3 client from ckanext-s3filestore uploader
             # This ensures we use the exact same configuration and credentials
             from ckan.common import config
+            import urllib.parse
+            from botocore.exceptions import ClientError
             
             # Get S3 configuration
             storage_path = config.get('ckanext.s3filestore.aws_storage_path', '')
-            
-            # Construct S3 key - extract filename from URL since resource['name'] may be outdated
             resource_id = resource.get('id')
-            
-            # Try to get actual filename from uploader first (most reliable)
-            try:
-                actual_filename = upload.get_path(resource_id).split('/')[-1]
-                log.info(f"Got filename from uploader path: {actual_filename}")
-            except:
-                # Fallback: extract from URL
-                url = refreshed_resource.get('url', '')
-                if url and '/download/' in url:
-                    # Extract filename from URL like: .../download/2025-12-08-11-26-11/small_world.tif
-                    actual_filename = url.split('/download/')[-1].split('/')[-1]
-                    log.info(f"Extracted filename from URL: {actual_filename}")
-                else:
-                    # Last resort: use resource name
-                    actual_filename = resource.get('name', 'file.tif')
-                    log.info(f"Using resource name: {actual_filename}")
-            
-            if storage_path:
-                s3_key = f"{storage_path}/resources/{resource_id}/{actual_filename}"
-            else:
-                s3_key = f"resources/{resource_id}/{actual_filename}"
             
             # Get the S3 client from the uploader instance (reuse its configuration)
             s3_client = upload.get_s3_client()
             bucket_name = upload.bucket_name
+            
+            # Derive filename from URL (more reliable than resource['name'])
+            url = resource.get('url', '')
+            if url:
+                parsed = urllib.parse.urlparse(url)
+                path_parts = parsed.path.split('/')
+                filename = path_parts[-1] if path_parts else resource.get('name', '')
+            else:
+                filename = resource.get('name', '')
+            
+            # Try multiple S3 key strategies to find the actual object
+            candidate_keys = []
+            
+            # Strategy 1: Check if uploader has object_key attribute (most reliable)
+            if hasattr(upload, 'object_key') and upload.object_key:
+                candidate_keys.append(upload.object_key)
+            
+            # Strategy 2: Base key without timestamp
+            base_key = f"{storage_path}/resources/{resource_id}/{filename}" if storage_path else f"resources/{resource_id}/{filename}"
+            candidate_keys.append(base_key)
+            
+            # Strategy 3: Timestamped subdirectory (parse from URL if available)
+            if '/download/' in url:
+                parts = url.split('/download/')
+                if len(parts) > 1:
+                    subpath = parts[1]
+                    if '/' in subpath:
+                        timestamp = subpath.split('/')[0]
+                        timestamped_key = f"{storage_path}/resources/{resource_id}/{timestamp}/{filename}" if storage_path else f"resources/{resource_id}/{timestamp}/{filename}"
+                        candidate_keys.append(timestamped_key)
+            
+            # Find the actual S3 key by trying HEAD requests
+            s3_key = None
+            for candidate in candidate_keys:
+                try:
+                    s3_client.head_object(Bucket=bucket_name, Key=candidate)
+                    s3_key = candidate
+                    log.info(f"Found S3 object at key: {s3_key}")
+                    break
+                except ClientError as e:
+                    if e.response.get('Error', {}).get('Code') == '404':
+                        log.debug(f"S3 key not found: {candidate}")
+                        continue
+                    else:
+                        # Other error (permissions, etc)
+                        log.warning(f"Error checking S3 key {candidate}: {e}")
+                        continue
+            
+            # If no candidate worked, try listing objects under the resource prefix
+            if not s3_key:
+                log.info(f"No candidate key found, trying list_objects_v2")
+                prefix = f"{storage_path}/resources/{resource_id}/" if storage_path else f"resources/{resource_id}/"
+                try:
+                    response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix, MaxKeys=10)
+                    if response.get('Contents'):
+                        for obj in response['Contents']:
+                            if obj['Key'].endswith(filename):
+                                s3_key = obj['Key']
+                                log.info(f"Found S3 object via listing: {s3_key}")
+                                break
+                except ClientError as e:
+                    log.error(f"Failed to list S3 objects: {e}")
+            
+            if not s3_key:
+                raise Exception(f"Could not find S3 object for resource {resource_id}. Tried keys: {candidate_keys}")
             
             log.info(f"Generating presigned URL for S3: bucket={bucket_name}, key={s3_key}")
             log.info(f"Using uploader config: region={upload.region}, signature={upload.signature}, addressing={upload.addressing_style}")
