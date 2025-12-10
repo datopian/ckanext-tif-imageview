@@ -86,12 +86,13 @@ def _get_or_create_s3_preview(resource, upload):
         return None
 
 
-def _generate_and_upload_preview(resource, preview_filename):
+def _generate_and_upload_preview(resource):
     """Download TIF from storage, convert to JPEG, and upload using CKAN uploader"""
     import requests
     import tempfile
     from werkzeug.datastructures import FileStorage
     import time
+    import urllib.parse
     
     # Step 1: Wait for original file to be fully uploaded and get its download URL
     # Refresh resource metadata to ensure we have the latest info
@@ -154,6 +155,10 @@ def _generate_and_upload_preview(resource, preview_filename):
                 filename = path_parts[-1] if path_parts else resource.get('name', '')
             else:
                 filename = resource.get('name', '')
+            
+            # Construct preview filename from actual filename (not resource name)
+            base_filename = os.path.splitext(filename)[0]
+            preview_filename = f"{base_filename}_preview.jpg"
             
             # Try multiple S3 key strategies to find the actual object
             candidate_keys = []
@@ -516,47 +521,17 @@ class TifImageviewPlugin(plugins.SingletonPlugin):
                 try:
                     log.info(f"Starting background preview generation for resource: {resource['id']}")
                     
-                    # Construct preview filename
-                    base_name = os.path.splitext(resource.get('name', 'file.tif'))[0]
-                    preview_filename = f"{base_name}_preview.jpg"
-                    
                     # If force_regenerate, delete existing preview first
                     if force_regenerate:
                         try:
-                            upload = uploader.get_resource_uploader(resource)
-                            uploader_class = upload.__class__.__name__
-                            is_s3 = 'S3' in uploader_class
-                            
-                            if is_s3:
-                                # Delete from S3
-                                from ckan.common import config
-                                storage_path = config.get('ckanext.s3filestore.aws_storage_path', '')
-                                resource_id = resource.get('id')
-                                
-                                if storage_path:
-                                    preview_key = f"{storage_path}/resources/{resource_id}/{preview_filename}"
-                                else:
-                                    preview_key = f"resources/{resource_id}/{preview_filename}"
-                                
-                                s3_client = upload.get_s3_client()
-                                bucket_name = upload.bucket_name
-                                
-                                log.info(f"Deleting existing preview from S3: {preview_key}")
-                                s3_client.delete_object(Bucket=bucket_name, Key=preview_key)
-                                log.info(f"Deleted existing preview from S3")
-                            else:
-                                # Delete from local storage
-                                filepath = upload.get_path(resource['id'])
-                                preview_path = _get_preview_path(filepath)
-                                if os.path.exists(preview_path):
-                                    log.info(f"Deleting existing preview: {preview_path}")
-                                    os.unlink(preview_path)
-                                    log.info(f"Deleted existing preview")
+                            # Note: Preview deletion logic could be added here if needed
+                            # Currently we just overwrite which is simpler
+                            log.info(f"Force regenerate enabled, will overwrite existing preview")
                         except Exception as e:
-                            log.warning(f"Could not delete existing preview (will overwrite): {e}")
+                            log.warning(f"Could not prepare for regeneration: {e}")
                     
                     # Download, convert, and upload
-                    _generate_and_upload_preview(resource, preview_filename)
+                    _generate_and_upload_preview(resource)
                     
                     log.info(f"Successfully generated and uploaded preview in background: {preview_filename}")
                     
