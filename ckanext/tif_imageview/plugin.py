@@ -292,29 +292,43 @@ def _generate_and_upload_preview(resource, preview_filename):
             
             log.info(f"Converted to JPEG: {temp_jpg_path}")
             
-            # Step 3: Upload using CKAN uploader
-            with open(temp_jpg_path, 'rb') as jpg_file:
-                # Create a FileStorage object that CKAN uploader expects
-                file_storage = FileStorage(
-                    stream=jpg_file,
-                    filename=preview_filename,
-                    content_type='image/jpeg'
-                )
+            # Step 3: Upload preview to S3 directly (to match the original file's path structure)
+            if is_s3:
+                # Upload preview to same S3 location as original (with timestamp if present)
+                preview_key = s3_key.rsplit('/', 1)[0] + '/' + preview_filename  # Same directory as original
                 
-                # Create a resource dict for the preview
-                preview_resource = {
-                    'id': resource['id'],
-                    'url': preview_filename,
-                    'url_type': 'upload',
-                    'upload': file_storage  # Pass the file to the uploader
-                }
-                
-                # Get uploader and upload the file
-                # The uploader will use credentials from CKAN config (works for both local MinIO and cloud S3)
-                preview_upload = uploader.get_resource_uploader(preview_resource)
-                preview_upload.upload(resource['id'], max_size=10)
-                
-                log.info(f"Uploaded preview using CKAN uploader: {preview_filename}")
+                with open(temp_jpg_path, 'rb') as jpg_file:
+                    try:
+                        s3_client.put_object(
+                            Bucket=bucket_name,
+                            Key=preview_key,
+                            Body=jpg_file,
+                            ContentType='image/jpeg'
+                        )
+                        log.info(f"Uploaded preview to S3: {preview_key}")
+                    except ClientError as e:
+                        log.error(f"Failed to upload preview to S3: {e}")
+                        raise Exception(f"Failed to upload preview: {e}")
+            else:
+                # For local storage: Use CKAN uploader
+                with open(temp_jpg_path, 'rb') as jpg_file:
+                    file_storage = FileStorage(
+                        stream=jpg_file,
+                        filename=preview_filename,
+                        content_type='image/jpeg'
+                    )
+                    
+                    preview_resource = {
+                        'id': resource['id'],
+                        'url': preview_filename,
+                        'url_type': 'upload',
+                        'upload': file_storage
+                    }
+                    
+                    preview_upload = uploader.get_resource_uploader(preview_resource)
+                    preview_upload.upload(resource['id'], max_size=10)
+                    
+                    log.info(f"Uploaded preview using CKAN uploader: {preview_filename}")
         finally:
             # Clean up JPEG temp file
             if os.path.exists(temp_jpg_path):
