@@ -299,8 +299,31 @@ def _generate_and_upload_preview(resource):
             
             # Step 3: Upload preview to S3 directly (to match the original file's path structure)
             if is_s3:
-                # Upload preview to same S3 location as original (with timestamp if present)
-                preview_key = s3_key.rsplit('/', 1)[0] + '/' + preview_filename  # Same directory as original
+                # IMPORTANT: For versioned resources, use the timestamp from the CURRENT resource URL
+                # not from the discovered s3_key (which might be an old version)
+                # This ensures the preview is in the correct timestamped directory
+                
+                # Extract timestamp from current resource URL (if present)
+                current_url = resource.get('url', '')
+                timestamp_dir = None
+                
+                if '/download/' in current_url:
+                    parts = current_url.split('/download/')
+                    if len(parts) > 1:
+                        subpath = parts[1]
+                        if '/' in subpath:
+                            timestamp_dir = subpath.split('/')[0]
+                            log.info(f"Extracted timestamp from current URL: {timestamp_dir}")
+                
+                # Construct preview key using current timestamp (not old s3_key location)
+                if timestamp_dir:
+                    # Use current timestamp directory for versioned resource
+                    preview_key = f"{storage_path}/resources/{resource_id}/{timestamp_dir}/{preview_filename}" if storage_path else f"resources/{resource_id}/{timestamp_dir}/{preview_filename}"
+                    log.info(f"Using current timestamp directory for preview: {preview_key}")
+                else:
+                    # Fallback: use same directory as discovered original file
+                    preview_key = s3_key.rsplit('/', 1)[0] + '/' + preview_filename
+                    log.info(f"No timestamp in URL, using discovered location: {preview_key}")
                 
                 with open(temp_jpg_path, 'rb') as jpg_file:
                     try:
@@ -533,7 +556,7 @@ class TifImageviewPlugin(plugins.SingletonPlugin):
                     # Download, convert, and upload
                     _generate_and_upload_preview(resource)
                     
-                    log.info(f"Successfully generated and uploaded preview in background: {preview_filename}")
+                    log.info(f"Successfully generated and uploaded preview in background for resource: {resource['id']}")
                     
                 except Exception as e:
                     log.error(f"Error generating preview in background: {e}", exc_info=True)
